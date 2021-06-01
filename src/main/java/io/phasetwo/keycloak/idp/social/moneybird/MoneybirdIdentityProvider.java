@@ -1,8 +1,8 @@
 package io.phasetwo.keycloak.idp.social.moneybird;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.node.ArrayNode;
-import java.util.Iterator;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import lombok.extern.jbosslog.JBossLog;
 import org.keycloak.broker.oidc.AbstractOAuth2IdentityProvider;
 import org.keycloak.broker.oidc.OAuth2IdentityProviderConfig;
 import org.keycloak.broker.oidc.mappers.AbstractJsonUserAttributeMapper;
@@ -12,10 +12,8 @@ import org.keycloak.broker.provider.util.SimpleHttp;
 import org.keycloak.broker.social.SocialIdentityProvider;
 import org.keycloak.events.EventBuilder;
 import org.keycloak.models.KeycloakSession;
-import lombok.extern.jbosslog.JBossLog;
 
-/**
- */
+/** */
 @JBossLog
 public class MoneybirdIdentityProvider extends AbstractOAuth2IdentityProvider
     implements SocialIdentityProvider {
@@ -23,6 +21,11 @@ public class MoneybirdIdentityProvider extends AbstractOAuth2IdentityProvider
   public static final String AUTH_URL = "https://moneybird.com/oauth/authorize";
   public static final String TOKEN_URL = "https://moneybird.com/oauth/token";
   public static final String DEFAULT_SCOPE = "sales_invoices";
+
+  private static final String ADMINISTRATIONS_URL =
+      "https://moneybird.com/api/v2/administrations.json";
+  private static final String PROFILE_URL_TEMPLATE =
+      "https://moneybird.com/api/v2/%s/users/userinfo.json";
 
   public MoneybirdIdentityProvider(KeycloakSession session, OAuth2IdentityProviderConfig config) {
     super(session, config);
@@ -36,23 +39,13 @@ public class MoneybirdIdentityProvider extends AbstractOAuth2IdentityProvider
   }
 
   @Override
-  protected BrokeredIdentityContext doGetFederatedIdentity(String accessToken) {
-    log.infof("doGetFederatedIdentity(%s)", accessToken);
-    return null;
-  }
-    
-  /*
-  @Override
-  protected String getProfileEndpointForValidation(EventBuilder event) {
-    return PROFILE_URL;
-  }
-
-  @Override
   protected BrokeredIdentityContext extractIdentityFromProfile(
       EventBuilder event, JsonNode profile) {
+    log.infof("profile %s", jsonString(profile));
+
     BrokeredIdentityContext user = new BrokeredIdentityContext(getJsonProperty(profile, "id"));
 
-    String username = getJsonProperty(profile, "login");
+    String username = getJsonProperty(profile, "email");
     user.setUsername(username);
     user.setName(getJsonProperty(profile, "name"));
     user.setEmail(getJsonProperty(profile, "email"));
@@ -67,48 +60,49 @@ public class MoneybirdIdentityProvider extends AbstractOAuth2IdentityProvider
 
   @Override
   protected BrokeredIdentityContext doGetFederatedIdentity(String accessToken) {
+    String profileUrl = String.format(PROFILE_URL_TEMPLATE, getAdministration(accessToken));
     try {
       JsonNode profile =
-          SimpleHttp.doGet(PROFILE_URL, session)
+          SimpleHttp.doGet(profileUrl, session)
               .header("Authorization", "Bearer " + accessToken)
               .asJson();
-
       BrokeredIdentityContext user = extractIdentityFromProfile(null, profile);
-
-      if (user.getEmail() == null) {
-        user.setEmail(searchEmail(accessToken));
-      }
-
       return user;
     } catch (Exception e) {
       throw new IdentityBrokerException("Could not obtain user profile from moneybird.", e);
     }
   }
 
-  private String searchEmail(String accessToken) {
+  /**
+   * This is a hack suggested by the moneybird developers. You need an administration_id in order to
+   * query their userinfo endpoint. They suggested calling the administrations endpoint and just
+   * using the first one. TBD will this work for multiple administrations, and if we don't have
+   * access to the first?
+   */
+  private String getAdministration(String accessToken) {
     try {
-      ArrayNode emails =
-          (ArrayNode)
-              SimpleHttp.doGet(EMAIL_URL, session)
-                  .header("Authorization", "Bearer " + accessToken)
-                  .asJson();
-
-      Iterator<JsonNode> loop = emails.elements();
-      while (loop.hasNext()) {
-        JsonNode mail = loop.next();
-        if (mail.get("primary").asBoolean()) {
-          return getJsonProperty(mail, "email");
-        }
-      }
+      JsonNode admins =
+          SimpleHttp.doGet(ADMINISTRATIONS_URL, session)
+              .header("Authorization", "Bearer " + accessToken)
+              .asJson();
+      return admins.get(0).get("id").textValue();
     } catch (Exception e) {
-      throw new IdentityBrokerException("Could not obtain user email from moneybird.", e);
+      throw new IdentityBrokerException("Could not obtain administrations from moneybird.", e);
     }
-    throw new IdentityBrokerException("Primary email from moneybird is not found.");
   }
-  */
-  
+
   @Override
   protected String getDefaultScopes() {
     return DEFAULT_SCOPE;
+  }
+
+  private static String jsonString(JsonNode jsonNode) {
+    try {
+      ObjectMapper mapper = new ObjectMapper();
+      Object json = mapper.readValue(jsonNode.toString(), Object.class);
+      return mapper.writerWithDefaultPrettyPrinter().writeValueAsString(json);
+    } catch (Exception e) {
+      return null;
+    }
   }
 }
